@@ -1,8 +1,7 @@
-(in-package :mcclim-render-internals)
+(in-package #:mcclim-render-internals)
 
-;;;
 ;;; path utility
-;;;
+
 (defun make-path (x y)
   (let ((path (paths:create-path :open-polyline)))
     (paths:path-reset path (paths:make-point x y))
@@ -21,9 +20,10 @@
   (let ((unit (line-style-unit line-style)))
     (ecase unit
       (:normal 1)
-      (:point (/ (graft-width (graft medium))
-                 (graft-width (graft medium) :units :inches)
-                 72))
+      (:point (let ((graft (graft medium)))
+                (/ (graft-width graft)
+                   (graft-width graft :units :inches)
+                   72)))
       (:coordinate (multiple-value-bind (x y)
                        (transform-distance (medium-transformation medium) 0.71 0.71)
                      (sqrt (+ (expt x 2) (expt y 2))))))))
@@ -34,59 +34,53 @@
 
 (defun line-style-effective-dashes (line-style medium)
   (let ((scale (line-style-scale line-style medium)))
-    (map 'vector #'(lambda (dash) (* dash scale))
+    (map 'vector (lambda (dash) (* dash scale))
          (line-style-dashes line-style))))
 
 (defun stroke-path (path line-style medium)
-  (alexandria:when-let ((dashes (clim:line-style-dashes line-style)))
-    (setf path (paths:dash-path path
-                                (case dashes
-                                  ((t) (vector (* (line-style-scale line-style medium) 3)))
-                                  (otherwise (line-style-effective-dashes line-style medium))))))
-  (paths:stroke-path path
-                     (max 1 (line-style-effective-thickness line-style medium))
-                     :joint (funcall #'(lambda (c)
-                                         (if (eq c :bevel)
-                                             :none
-                                             c))
-                                     (line-style-joint-shape line-style))
-                     :caps (funcall #'(lambda (c)
-                                        (if (eq c :no-end-point)
-                                            :butt
-                                            c))
-                                    (line-style-cap-shape line-style))))
+  (let ((effective-thickness (line-style-effective-thickness
+                              line-style medium))
+        (joint-shape (line-style-joint-shape line-style))
+        (cap-shape (line-style-cap-shape line-style)))
+    (when-let ((dashes (clim:line-style-dashes line-style)))
+      (setf path (paths:dash-path path
+                                  (case dashes
+                                    ((t) (vector (* (line-style-scale line-style medium) 3)))
+                                    (otherwise (line-style-effective-dashes line-style medium))))))
+    (paths:stroke-path path (max 1 effective-thickness)
+                       :joint (if (eq joint-shape :bevel)
+                                  :none
+                                  joint-shape)
+                       :caps (if (eq cap-shape :no-end-point)
+                                 :butt
+                                 cap-shape))))
 
 (defun aa-cells-sweep/rectangle (image ink state clip-region)
-  (let ((current-clip-region (if (rectanglep clip-region)
-                                 nil
-                                 clip-region)))
+  (let* ((complex-clip-region (if (rectanglep clip-region)
+                                  nil
+                                  clip-region))
+         (draw-function (if (typep ink 'standard-flipping-ink)
+                            (aa-render-xor-draw-fn image complex-clip-region ink)
+                            (aa-render-draw-fn image complex-clip-region ink))))
     (clim:with-bounding-rectangle* (min-x min-y max-x max-y) clip-region
       (%aa-cells-sweep/rectangle state
                                  (floor min-x)
                                  (floor min-y)
                                  (ceiling max-x)
                                  (ceiling max-y)
-                                 (if (typep ink 'standard-flipping-ink)
-                                     (aa-render-xor-draw-fn image current-clip-region ink)
-                                     (aa-render-draw-fn image current-clip-region ink))))))
+                                 draw-function))))
 
-;;; XXX: ink is not used
-(defun aa-cells-alpha-sweep/rectangle (image ink state clip-region)
-  (let ((draw-function nil)
-        (current-clip-region
-         (if (rectanglep clip-region)
-             nil
-             clip-region)))
-    (clim:with-bounding-rectangle* (min-x min-y max-x max-y)
-        clip-region
-      (setf draw-function
-            (aa-render-alpha-draw-fn image current-clip-region))
+(defun aa-cells-alpha-sweep/rectangle (image state clip-region)
+  (let ((draw-function (aa-render-alpha-draw-fn image (if (rectanglep clip-region)
+                                                          nil
+                                                          clip-region))))
+    (clim:with-bounding-rectangle* (min-x min-y max-x max-y) clip-region
       (%aa-cells-sweep/rectangle state
-                                (floor min-x)
-                                (floor min-y)
-                                (ceiling max-x)
-                                (ceiling max-y)
-                                draw-function))))
+                                 (floor min-x)
+                                 (floor min-y)
+                                 (ceiling max-x)
+                                 (ceiling max-y)
+                                 draw-function))))
 
 (defun aa-stroke-paths (medium image design paths line-style state transformation clip-region)
   (vectors::state-reset state)
